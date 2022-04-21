@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/zondax/hid"
 )
@@ -86,7 +87,7 @@ func FindLedger() (*Ledger, error) {
 		}
 	}
 
-	return nil, errors.New("no ledger connected")
+	return nil, errors.New("No Ledger connected, Ledger LOCKED OR Keplr/Ledger Live may have control of device")
 }
 
 func ErrorMessage(errorCode uint16) string {
@@ -107,7 +108,7 @@ func ErrorMessage(errorCode uint16) string {
 	case 0x6985:
 		return "[APDU_CODE_CONDITIONS_NOT_SATISFIED] Conditions of use not satisfied"
 	case 0x6986:
-		return "[APDU_CODE_COMMAND_NOT_ALLOWED] Command not allowed (no current EF)"
+		return "[APDU_CODE_COMMAND_NOT_ALLOWED] Command not allowed / User Rejected (no current EF)"
 	case 0x6A80:
 		return "[APDU_CODE_BAD_KEY_HANDLE] The parameters in the data field are incorrect"
 	case 0x6B00:
@@ -116,6 +117,8 @@ func ErrorMessage(errorCode uint16) string {
 		return "[APDU_CODE_INS_NOT_SUPPORTED] Instruction code not supported or invalid"
 	case 0x6E00:
 		return "[APDU_CODE_CLA_NOT_SUPPORTED] Class not supported"
+	case 0x6E01:
+		return "[0x6E01] Ledger Connected but Cosmos App Not Open"
 	case 0x6F00:
 		return "APDU_CODE_UNKNOWN"
 	case 0x6F01:
@@ -165,21 +168,56 @@ func (ledger *Ledger) readThread() {
 		buffer := make([]byte, PacketSize)
 		readBytes, err := ledger.device.Read(buffer)
 
-		if ledger.Logging {
-			fmt.Printf("[%3d] (= %x\n", readBytes, buffer[:readBytes])
+		// Check for HID Read Error (May occur even during normal runtime)
+		if err != nil {
+			continue
 		}
 
-		if err != nil {
-			return
+		// Ledger Nano X can successfully return 64 zeros on HID read, then later return the actual response desired in a later HID report
+		//   Detect this all zero condition and try again
+		allZeros := true
+		for i := 0; i < 64; i++ {
+			if buffer[i] != 0 {
+				allZeros = false
+				break
+			}
 		}
+
+		// Try another read when an all Zero packet arrives
+		if allZeros {
+			if ledger.Logging {
+				fmt.Printf("HID Returned Empty Packet - Retry\n")
+			}
+			continue
+		}
+
+		// Send data from HID to rest of program
 		select {
 		case ledger.readChannel <- buffer[:readBytes]:
+			if ledger.Logging {
+				fmt.Printf("readThread: Sent data to UnwrapResponseAPDU %d: %v\n", readBytes, buffer)
+			}
 		default:
 		}
 	}
 }
 
+func (ledger *Ledger) drainRead() {
+	// Allow time for late packet arrivals (When main program doesn't read enough packets)
+	<-time.After(50 * time.Millisecond)
+	for {
+		select {
+		case <-ledger.readChannel:
+		default:
+			return
+		}
+	}
+}
+
 func (ledger *Ledger) Exchange(command []byte) ([]byte, error) {
+	// Purge messages that arrived after previous exchange completed
+	ledger.drainRead()
+
 	if ledger.Logging {
 		fmt.Printf("[%3d]=> %x\n", len(command), command)
 	}
@@ -204,7 +242,6 @@ func (ledger *Ledger) Exchange(command []byte) ([]byte, error) {
 	}
 
 	readChannel := ledger.Read()
-
 	response, err := UnwrapResponseAPDU(Channel, readChannel, PacketSize)
 
 	if len(response) < 2 {
@@ -215,7 +252,7 @@ func (ledger *Ledger) Exchange(command []byte) ([]byte, error) {
 	sw := codec.Uint16(response[swOffset:])
 
 	if ledger.Logging {
-		fmt.Printf("Response: [%3d]<= %x [%#x]\n", len(response[:swOffset]), response[:swOffset], sw)
+		fmt.Printf("Response: [%3d]<= %x [ResultCode: %#x]\n", len(response[:swOffset]), response[:swOffset], sw)
 	}
 	if sw != 0x9000 {
 		return response[:swOffset], errors.New(ErrorMessage(sw))

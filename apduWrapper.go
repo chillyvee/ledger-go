@@ -18,6 +18,8 @@ package ledger_go
 
 import (
 	"encoding/binary"
+	"fmt"
+
 	"github.com/pkg/errors"
 )
 
@@ -68,26 +70,35 @@ func SerializePacket(
 func DeserializePacket(
 	channel uint16,
 	buffer []byte,
-	sequenceIdx uint16) (result []byte, totalResponseLength uint16, err error) {
+	sequenceIdx uint16) (result []byte, totalResponseLength uint16, isSequenceZero bool, err error) {
+
+	isSequenceZero = false
 
 	if (sequenceIdx == 0 && len(buffer) < 7) || (sequenceIdx > 0 && len(buffer) < 5) {
-		return nil, 0, errors.New("Cannot deserialize the packet. Header information is missing.")
+		return nil, 0, isSequenceZero, errors.New("Cannot deserialize the packet. Header information is missing.")
 	}
 
 	var headerOffset uint8
 
 	if codec.Uint16(buffer) != channel {
-		return nil, 0, errors.New("Invalid channel")
+		return nil, 0, isSequenceZero, errors.New(fmt.Sprintf("Invalid channel.  Expected %d, Got: %d", channel, codec.Uint16(buffer)))
 	}
 	headerOffset += 2
 
 	if buffer[headerOffset] != 0x05 {
-		return nil, 0, errors.New("Invalid tag")
+		return nil, 0, isSequenceZero, errors.New(fmt.Sprintf("Invalid tag.  Expected %d, Got: %d", 0x05, buffer[headerOffset]))
 	}
 	headerOffset++
 
-	if codec.Uint16(buffer[headerOffset:]) != sequenceIdx {
-		return nil, 0, errors.New("Wrong sequenceIdx")
+	foundSequenceIdx := codec.Uint16(buffer[headerOffset:])
+	if foundSequenceIdx == 0 {
+		isSequenceZero = true
+	} else {
+		isSequenceZero = false
+	}
+
+	if foundSequenceIdx != sequenceIdx {
+		return nil, 0, isSequenceZero, errors.New(fmt.Sprintf("Wrong sequenceIdx.  Expected %d, Got: %d", sequenceIdx, foundSequenceIdx))
 	}
 	headerOffset += 2
 
@@ -99,7 +110,7 @@ func DeserializePacket(
 	result = make([]byte, len(buffer)-int(headerOffset))
 	copy(result, buffer[headerOffset:])
 
-	return result, totalResponseLength, nil
+	return result, totalResponseLength, isSequenceZero, nil
 }
 
 // WrapCommandAPDU turns the command into a sequence of 64 byte packets
@@ -133,15 +144,33 @@ func UnwrapResponseAPDU(channel uint16, pipe <-chan []byte, packetSize int) ([]b
 	var totalSize uint16
 	var done = false
 
+	// return values from DeserializePacket
+	var result []byte
+	var responseSize uint16
+	var err error
+
+	foundZeroSequence := false
+	isSequenceZero := false
+
 	for !done {
 		// Read next packet from the channel
 		buffer := <-pipe
 
-		result, responseSize, err := DeserializePacket(channel, buffer, sequenceIdx)
+		result, responseSize, isSequenceZero, err = DeserializePacket(channel, buffer, sequenceIdx) // this may fail if the wrong sequence arrives (espeically if left over all 0000 was in the buffer from the last tx)
+
+		// Recover from a known error condition:
+		// * Discard messages left over from previous exchange until isSequenceZero == true
+		if foundZeroSequence == false && isSequenceZero == false {
+			continue
+		}
+		foundZeroSequence = true
+
 		if err != nil {
 			return nil, err
 		}
-		if sequenceIdx == 0 {
+
+		// Initialize totalSize (previously we did this if sequenceIdx == 0, but sometimes Nano X can provide the first sequenceIdx == 0 packet with all zeros, then a useful packet with sequenceIdx == 1
+		if totalSize == 0 {
 			totalSize = responseSize
 		}
 

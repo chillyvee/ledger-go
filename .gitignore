@@ -16,8 +16,10 @@
 *.dylib
 *.dll
 
+# Fortran module files - Why? For now, Allow go.mod
+#*.mod
+
 # Fortran module files
-*.mod
 *.smod
 
 # Compiled Static libraries

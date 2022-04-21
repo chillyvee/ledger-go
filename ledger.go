@@ -85,7 +85,7 @@ func FindLedger() (*Ledger, error) {
 		}
 	}
 
-	return nil, errors.New("no ledger connected")
+	return nil, errors.New("No Ledger connected, Ledger LOCKED OR Keplr/Ledger Live may have control of device")
 }
 
 func ErrorMessage(errorCode uint16) string {
@@ -106,7 +106,7 @@ func ErrorMessage(errorCode uint16) string {
 	case 0x6985:
 		return "[APDU_CODE_CONDITIONS_NOT_SATISFIED] Conditions of use not satisfied"
 	case 0x6986:
-		return "[APDU_CODE_COMMAND_NOT_ALLOWED] Command not allowed (no current EF)"
+		return "[APDU_CODE_COMMAND_NOT_ALLOWED] Command not allowed / User Rejected (no current EF)"
 	case 0x6A80:
 		return "[APDU_CODE_BAD_KEY_HANDLE] The parameters in the data field are incorrect"
 	case 0x6B00:
@@ -115,6 +115,8 @@ func ErrorMessage(errorCode uint16) string {
 		return "[APDU_CODE_INS_NOT_SUPPORTED] Instruction code not supported or invalid"
 	case 0x6E00:
 		return "[APDU_CODE_CLA_NOT_SUPPORTED] Class not supported"
+	case 0x6E01:
+		return "[0x6E01] Ledger Connected but Cosmos App Not Open"
 	case 0x6F00:
 		return "APDU_CODE_UNKNOWN"
 	case 0x6F01:
@@ -191,6 +193,7 @@ func (ledger *Ledger) Exchange(command []byte) ([]byte, error) {
 		return nil, fmt.Errorf("APDU[data length] mismatch")
 	}
 
+	fmt.Printf("WrapCommandAPDU 0x%02X, %v, 0x%02X\n", Channel, command, PacketSize)
 	serializedCommand, err := WrapCommandAPDU(Channel, command, PacketSize)
 	if err != nil {
 		return nil, err
@@ -207,7 +210,7 @@ func (ledger *Ledger) Exchange(command []byte) ([]byte, error) {
 	response, err := UnwrapResponseAPDU(Channel, readChannel, PacketSize)
 
 	if len(response) < 2 {
-		return nil, fmt.Errorf("len(response) < 2")
+		return nil, fmt.Errorf("len(response) < 2, %q", err)
 	}
 
 	swOffset := len(response) - 2

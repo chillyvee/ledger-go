@@ -18,6 +18,8 @@ package ledger_go
 
 import (
 	"encoding/binary"
+	"fmt"
+
 	"github.com/pkg/errors"
 )
 
@@ -69,6 +71,7 @@ func DeserializePacket(
 	channel uint16,
 	buffer []byte,
 	sequenceIdx uint16) (result []byte, totalResponseLength uint16, err error) {
+	fmt.Printf("DeserializePacket 0x%02X, %v, 0x%02X\n", channel, buffer, sequenceIdx)
 
 	if (sequenceIdx == 0 && len(buffer) < 7) || (sequenceIdx > 0 && len(buffer) < 5) {
 		return nil, 0, errors.New("Cannot deserialize the packet. Header information is missing.")
@@ -77,17 +80,17 @@ func DeserializePacket(
 	var headerOffset uint8
 
 	if codec.Uint16(buffer) != channel {
-		return nil, 0, errors.New("Invalid channel")
+		return nil, 0, errors.New(fmt.Sprintf("Invalid channel.  Expected %d, Got: %d", channel, codec.Uint16(buffer)))
 	}
 	headerOffset += 2
 
 	if buffer[headerOffset] != 0x05 {
-		return nil, 0, errors.New("Invalid tag")
+		return nil, 0, errors.New(fmt.Sprintf("Invalid tag.  Expected %d, Got: %d", 0x05, buffer[headerOffset]))
 	}
 	headerOffset++
 
 	if codec.Uint16(buffer[headerOffset:]) != sequenceIdx {
-		return nil, 0, errors.New("Wrong sequenceIdx")
+		return nil, 0, errors.New(fmt.Sprintf("Wrong sequenceIdx.  Expected %d, Got: %d", sequenceIdx, codec.Uint16(buffer[headerOffset:])))
 	}
 	headerOffset += 2
 
@@ -137,8 +140,11 @@ func UnwrapResponseAPDU(channel uint16, pipe <-chan []byte, packetSize int) ([]b
 		// Read next packet from the channel
 		buffer := <-pipe
 
+		fmt.Printf("UnwrapResponseAPDU 0x%02X, %v, 0x%02X\n", channel, buffer, packetSize)
+
 		result, responseSize, err := DeserializePacket(channel, buffer, sequenceIdx)
 		if err != nil {
+			fmt.Printf("Fatal Error: DeserializePacket Error: %v\n", err)
 			return nil, err
 		}
 		if sequenceIdx == 0 {

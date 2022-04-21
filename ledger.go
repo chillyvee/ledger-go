@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/zondax/hid"
 )
@@ -42,7 +43,7 @@ type Ledger struct {
 func NewLedger(dev *hid.Device) *Ledger {
 	return &Ledger{
 		device:  *dev,
-		Logging: false,
+		Logging: true,
 	}
 }
 
@@ -160,27 +161,59 @@ func (ledger *Ledger) initReadChannel() {
 }
 
 func (ledger *Ledger) readThread() {
+	ledger.Logging = true
 	defer close(ledger.readChannel)
 
+	okOnce := false
 	for {
 		buffer := make([]byte, PacketSize)
 		readBytes, err := ledger.device.Read(buffer)
 
+		fmt.Printf("[%3d] rT (= %x\n", readBytes, buffer[:readBytes])
 		if ledger.Logging {
-			fmt.Printf("[%3d] (= %x\n", readBytes, buffer[:readBytes])
 		}
 
+		// Ledger Nano X is known for returning late packets
+		<-time.After(150 * time.Millisecond)
+
 		if err != nil {
-			return
+			if okOnce {
+				fmt.Printf("**readThread Error: %v - Already had data, ABORTing \n", err)
+				return
+			} else {
+				fmt.Printf("\t\t**readThread Error: %v -- No Data Yet, RETRY\n", err)
+			}
 		}
+		<-time.After(150 * time.Millisecond)
+
+		// Ledger Nano X can successfully return 64 zeros on HID read, and return the actual response you want in a later HID report
+		//   Detect this all zero condition and try again
+		allZeros := true
+		for i := 0; i < 64; i++ {
+			if buffer[i] != 0 {
+				allZeros = false
+				break
+			}
+		}
+
+		if allZeros {
+			fmt.Printf("\t\treadThread: Avoid sending empty packet to UnwrapResponseAPDU - Retry\n")
+			continue
+		}
+
 		select {
 		case ledger.readChannel <- buffer[:readBytes]:
+			fmt.Printf("readThread: Sent data to UnwrapResponseAPDU %d: %v\n", readBytes, buffer)
+			okOnce = true
 		default:
 		}
 	}
+	fmt.Printf("readThread exiting\n")
+
 }
 
 func (ledger *Ledger) Exchange(command []byte) ([]byte, error) {
+	fmt.Printf("[Exchange] Begin\n")
 	if ledger.Logging {
 		fmt.Printf("[%3d]=> %x\n", len(command), command)
 	}
@@ -199,14 +232,17 @@ func (ledger *Ledger) Exchange(command []byte) ([]byte, error) {
 		return nil, err
 	}
 
+	<-time.After(150 * time.Millisecond)
 	// Write all the packets
 	_, err = ledger.Write(serializedCommand)
 	if err != nil {
 		return nil, err
 	}
 
-	readChannel := ledger.Read()
+	// Ledger Nano X Bug - For whatever reason (perhaps Nano X write is slow?), sometimes the following read completes "before" the previous write.  How? No idea.  Wait till write his finished
+	<-time.After(50 * time.Millisecond)
 
+	readChannel := ledger.Read()
 	response, err := UnwrapResponseAPDU(Channel, readChannel, PacketSize)
 
 	if len(response) < 2 {
@@ -223,5 +259,6 @@ func (ledger *Ledger) Exchange(command []byte) ([]byte, error) {
 		return response[:swOffset], errors.New(ErrorMessage(sw))
 	}
 
+	fmt.Printf("[Exchange] End\n")
 	return response[:swOffset], nil
 }
